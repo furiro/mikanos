@@ -22,7 +22,7 @@ then
   exit 1
 fi
 
-edk2_dir="$HOME/edk2"
+edk2_dir="$MIKAN_HOME/edk2"
 bootloader="$edk2_dir/Build/MikanLoaderX64/DEBUG_CLANG38/X64/Loader.efi"
 
 if [ ! -f $bootloader ]
