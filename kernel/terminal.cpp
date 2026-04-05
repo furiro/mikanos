@@ -20,6 +20,8 @@
 #include "usb/classdriver/cdc.hpp"
 #include "usb/xhci/xhci.hpp"
 
+#include "hypervisor/hypervisor.hpp"
+
 namespace {
 
 WithError<int> MakeArgVector(char* command, char* first_arg,
@@ -711,6 +713,9 @@ void Terminal::ExecuteLine() {
       }
       PrintToFD(*files_[1], "exit_code=%d\n", code);
     }();
+  } else if (strcmp(command, "hyper") == 0) {
+    PrintToFD(*files_[2], "hyper\n");
+    HypervisorMain();
   } else if (command[0] != 0) {
     auto file_entry = FindCommand(command);
     if (!file_entry) {
