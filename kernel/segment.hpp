@@ -11,6 +11,11 @@
 
 #include "x86_descriptor.hpp"
 
+struct DescriptorTablePtr {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed));
+
 union SegmentDescriptor {
   uint64_t data;
   struct {
@@ -28,6 +33,12 @@ union SegmentDescriptor {
     uint64_t granularity : 1;
     uint64_t base_high : 8;
   } __attribute__((packed)) bits;
+} __attribute__((packed));
+
+union SystemSegmentDescriptor {
+  SegmentDescriptor low;
+  uint32_t base_upper;
+  uint32_t reserved;
 } __attribute__((packed));
 
 void SetCodeSegment(SegmentDescriptor& desc,
@@ -49,3 +60,7 @@ const uint16_t kTSS = 5 << 3;
 void SetupSegments();
 void InitializeSegmentation();
 void InitializeTSS();
+
+uint64_t GetSegmentBaseGdtOnly(DescriptorTablePtr gdtr, uint16_t selector);
+uint64_t GetSegmentLimitGdtOnly(DescriptorTablePtr gdtr, uint16_t selector);
+uint32_t GetSegmentAccessRightsGdtOnly(DescriptorTablePtr gdtr, uint16_t selector);
