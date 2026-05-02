@@ -2,6 +2,15 @@
 
 make ${MAKE_OPTS:-} -C kernel kernel.elf
 
+
+for MK in $(ls libs/*/Makefile)
+do
+  LIB_DIR=$(dirname $MK)
+  LIB=$(basename $LIB_DIR)
+  make ${MAKE_OPTS:-} -C $LIB_DIR $LIB
+done
+
+
 for MK in $(ls apps/*/Makefile)
 do
   APP_DIR=$(dirname $MK)

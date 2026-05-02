@@ -23,6 +23,7 @@
 #include "hypervisor/hypervisor.hpp"
 
 namespace {
+WithError<uint64_t> CopyDynamicSegment(Elf64_Ehdr *ehdr, Elf64_Addr base_offset, LibraryInfo *lib_info);
 
 WithError<int> MakeArgVector(char* command, char* first_arg,
     char** argv, int argv_len, char* argbuf, int argbuf_len) {
@@ -92,17 +93,21 @@ uintptr_t GetFirstLoadAddress(Elf64_Ehdr* ehdr) {
 
 static_assert(kBytesPerFrame >= 4096);
 
-WithError<uint64_t> CopyLoadSegments(Elf64_Ehdr* ehdr) {
+WithError<uint64_t> CopyLoadSegments(Elf64_Ehdr* ehdr, Elf64_Addr base_offset) {
   auto phdr = GetProgramHeader(ehdr);
   uint64_t last_addr = 0;
   for (int i = 0; i < ehdr->e_phnum; ++i) {
     if (phdr[i].p_type != PT_LOAD) continue;
-
+    
     LinearAddress4Level dest_addr;
-    dest_addr.value = phdr[i].p_vaddr;
-    last_addr = std::max(last_addr, phdr[i].p_vaddr + phdr[i].p_memsz);
-    const auto num_4kpages =
-      ((phdr[i].p_vaddr & 4095) + phdr[i].p_memsz + 4095) / 4096;
+    dest_addr.value = phdr[i].p_vaddr + base_offset;
+    last_addr = std::max(last_addr, phdr[i].p_vaddr + base_offset + phdr[i].p_memsz);
+
+    auto init = dest_addr.value & 0xffff'ffff'ffff'f000;
+    auto end  = (dest_addr.value + phdr[i].p_memsz);
+
+    //const auto num_4kpages = (phdr[i].p_memsz + 4095) / 4096;
+    const auto num_4kpages = (end - init +0xfff) / 0x1000;
 
     // setup pagemaps as readonly (writable = false)
     if (auto err = SetupPageMaps(dest_addr, num_4kpages, false)) {
@@ -110,24 +115,231 @@ WithError<uint64_t> CopyLoadSegments(Elf64_Ehdr* ehdr) {
     }
 
     const auto src = reinterpret_cast<uint8_t*>(ehdr) + phdr[i].p_offset;
-    const auto dst = reinterpret_cast<uint8_t*>(phdr[i].p_vaddr);
+    const auto dst = reinterpret_cast<uint8_t*>(phdr[i].p_vaddr + base_offset);
     memcpy(dst, src, phdr[i].p_filesz);
     memset(dst + phdr[i].p_filesz, 0, phdr[i].p_memsz - phdr[i].p_filesz);
   }
   return { last_addr, MAKE_ERROR(Error::kSuccess) };
 }
 
+
+Elf64_Addr LookupSymbolName(char* target_name, LibraryInfo lib_info ) {
+  Log(kDebug, "LookupSymbolName in %08X%08X ...", lib_info.lib_base>>32, lib_info.lib_base);
+
+  for (int j=0; j < lib_info.symbol_count; j++) {
+    Elf64_Sym symbol = lib_info.symbol_table_addres[j];
+    auto symbol_name  = lib_info.str_table_addres + symbol.st_name;
+    if (!strcmp(symbol_name, target_name)) {
+      Log(kDebug, "Success\n");
+      return symbol.st_value + lib_info.lib_base;
+    }
+  }
+
+  Log(kDebug, "Not Found\n");
+  return 0;
+}
+
+
+Error LoadLib(Elf64_Ehdr* ehdr, LibraryInfo *lib_info, Elf64_Addr *last_addr) {
+
+  Elf64_Addr  base_addr = lib_info->lib_base;
+
+  auto [loadseg_last_addr, loadseg_err] = CopyLoadSegments(ehdr, base_addr);
+  if (loadseg_err) {
+    return loadseg_err;
+  }
+
+  LibraryInfo temp;
+  auto [ dynseg_last_addr, dynseg_err] = CopyDynamicSegment(ehdr, base_addr, &temp);
+  if (dynseg_err) {
+    return dynseg_err;
+  }
+  *lib_info = temp;
+
+  *last_addr =  std::max(loadseg_last_addr, dynseg_last_addr);
+  return MAKE_ERROR(Error::kSuccess);
+}
+
+
+
+WithError<uint64_t> CopyDynamicSegment(Elf64_Ehdr *ehdr, Elf64_Addr base_offset, LibraryInfo *lib_info) {
+
+  Log(kInfo, "DynamicSegments to %08X%08X\n", base_offset>>32, base_offset);
+  int i = 0;
+  auto phdr = GetProgramHeader(ehdr);
+  uint64_t last_addr = 0;
+
+  for (i=0;i < ehdr->e_phnum; i++) {
+    if (phdr[i].p_type == PT_DYNAMIC) break;
+  }
+
+  if (i == ehdr->e_phnum) return { 0, MAKE_ERROR(Error::kSuccess)}; // No DYNAMIC segment
+
+  LinearAddress4Level dest_addr;
+  dest_addr.value = phdr[i].p_vaddr + base_offset;
+  last_addr = std::max(last_addr, phdr[i].p_vaddr + base_offset + phdr[i].p_memsz);
+
+  auto init = dest_addr.value & 0xffff'ffff'ffff'f000;
+  auto end  = (dest_addr.value + phdr[i].p_memsz);
+
+  //const auto num_4kpages = (phdr[i].p_memsz + 4095) / 4096;
+  const auto num_4kpages = (end - init +0xfff) / 0x1000;
+
+  // setup pagemaps as readonly (writable = false)
+  if (auto err = SetupPageMaps(dest_addr, num_4kpages, false)) {
+    return { last_addr, err };
+  }
+
+  const auto src = reinterpret_cast<uint8_t*>(ehdr) + phdr[i].p_offset;
+  const auto dst = reinterpret_cast<uint8_t*>(phdr[i].p_vaddr + base_offset);
+  memcpy(dst, src, phdr[i].p_filesz);
+  memset(dst + phdr[i].p_filesz, 0, phdr[i].p_memsz - phdr[i].p_filesz);
+
+  //  std::vector<uint8_t> file_buf(file_entry.file_size);
+  int num_entries = phdr[i].p_filesz/sizeof(Elf64_Dyn);
+  std::vector<int> needed_tag_list(num_entries);
+  int num_needed = 0;
+
+  Elf64_Addr    rela_table_addres   = 0;
+  Elf64_Xword   rela_table_size     = 0;
+  Elf64_Addr    plt_got_address     = 0;
+  Elf64_Addr    symbol_table_addres = 0;
+  Elf64_Xword   symbol_entry_size   = 0;
+  Elf64_Addr    str_table_addres    = 0;
+  Elf64_Xword   str_table_size      = 0;
+  size_t sumbol_count = 0;
+
+  Elf64_Dyn *dyna_sgement_entry = reinterpret_cast<Elf64_Dyn*>(dst);
+  for (int j=0; j<num_entries; j++) {
+    switch (dyna_sgement_entry[j].d_tag) {
+    case DT_NEEDED:
+      needed_tag_list[num_needed] = j;
+      num_needed++;
+      break;
+    case DT_JMPREL:
+      if (rela_table_addres != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      rela_table_addres = dyna_sgement_entry[j].d_un.d_ptr + base_offset;
+      break;
+    case DT_PLTRELSZ:
+      if (rela_table_size != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      rela_table_size = dyna_sgement_entry[j].d_un.d_val;
+      break;
+    case DT_PLTGOT:
+      if (plt_got_address != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      plt_got_address = dyna_sgement_entry[j].d_un.d_ptr + base_offset;
+      break;
+    case DT_PLTREL:
+      if (dyna_sgement_entry[j].d_un.d_val != 7) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      break;
+    case DT_SYMTAB:
+      if (symbol_table_addres != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      symbol_table_addres = dyna_sgement_entry[j].d_un.d_ptr + base_offset;
+      break;
+    case DT_SYMENT:
+      if (symbol_entry_size != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      if (dyna_sgement_entry[j].d_un.d_val != sizeof(Elf64_Sym)) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      symbol_entry_size = dyna_sgement_entry[j].d_un.d_val;
+      break;
+    case DT_STRTAB:
+      if (str_table_addres != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      str_table_addres = dyna_sgement_entry[j].d_un.d_ptr + base_offset;
+      break;
+    case DT_STRSZ:
+      if (str_table_size != 0) return {0, MAKE_ERROR(Error::kInvalidFormat)};
+      str_table_size = dyna_sgement_entry[j].d_un.d_val;
+      break;
+    case DT_HASH:
+    {
+      auto sysv_hash_addr = dyna_sgement_entry[j].d_un.d_ptr + base_offset;
+      sumbol_count = reinterpret_cast<Elf64_Word*>(sysv_hash_addr)[1];
+    }
+    default:
+      break;
+    }
+  }
+
+  std::vector<LibraryInfo> lib_infos(num_needed);
+
+  for (int j = 0; j < num_needed; j++) {
+    auto offset = dyna_sgement_entry[needed_tag_list[j]].d_un.d_val;
+    auto lib_name = reinterpret_cast<uint8_t*>(str_table_addres) + offset;
+    
+    auto libs_entry = fat::FindFile("libs");
+    if (libs_entry.first == nullptr ||
+        libs_entry.first->attr != fat::Attribute::kDirectory) {
+      Log(kError, "Failed to find libs directory\n");
+      return {0, MAKE_ERROR(Error::kInvalidFormat)};
+    }
+    auto [file_entry, post_slash] = fat::FindFile(reinterpret_cast<char *>(lib_name), libs_entry.first->FirstCluster());
+    if (!file_entry) {
+      Log(kError, "Failed to find library file: %s\n", lib_name);
+      return {0, MAKE_ERROR(Error::kInvalidFormat)};
+    }
+    std::vector<uint8_t> file_buf(file_entry->file_size);
+    fat::LoadFile(&file_buf[0], file_buf.size(), *file_entry);
+    
+    auto elf_header = reinterpret_cast<Elf64_Ehdr*>(&file_buf[0]);
+    lib_infos[j].lib_base = (last_addr + 0x0fff) & 0xffff'ffff'ffff'f000;
+    if (auto err = LoadLib(elf_header, &lib_infos[j], &last_addr)) {
+      return {0, err};
+    }
+  }
+
+  for (int j=0; j < rela_table_size/sizeof(Elf64_Rela); j++) {
+    Elf64_Rela rela   = reinterpret_cast<Elf64_Rela*>(rela_table_addres)[j];
+    auto symbol_index = rela.r_info >> 32;
+    Elf64_Sym symbol  = reinterpret_cast<Elf64_Sym*>(symbol_table_addres)[symbol_index];
+    auto symbol_name  = reinterpret_cast<char*>(str_table_addres) + symbol.st_name;
+    Log(kDebug, "Link %s\n", symbol_name);
+    for (int k = 0; k < num_needed; k++) {
+      auto overwrite = LookupSymbolName(symbol_name, lib_infos[k]);
+      if (overwrite) {
+        *reinterpret_cast<Elf64_Addr*>(rela.r_offset + base_offset) = overwrite + rela.r_addend;
+        break;
+      }
+    }
+  }
+
+
+  // lib_info is OUTPUT. not used in this function.
+  if (lib_info != 0) {
+    lib_info->lib_base            = base_offset;
+    lib_info->str_table_addres    = reinterpret_cast<char*>(str_table_addres);
+    lib_info->symbol_count        = sumbol_count;
+    lib_info->symbol_table_addres = reinterpret_cast<Elf64_Sym*>(symbol_table_addres);
+  }
+
+
+  return {last_addr, MAKE_ERROR(Error::kSuccess)};
+}
+
+
 WithError<uint64_t> LoadELF(Elf64_Ehdr* ehdr) {
+  SetLogLevel(kInfo);
   if (ehdr->e_type != ET_EXEC) {
     return { 0, MAKE_ERROR(Error::kInvalidFormat) };
   }
 
   const auto addr_first = GetFirstLoadAddress(ehdr);
   if (addr_first < 0xffff'8000'0000'0000) {
+    Log(kError, "Invalid ELF: the first load address must be above 0xffff800000000000.\n");
     return { 0, MAKE_ERROR(Error::kInvalidFormat) };
   }
 
-  return CopyLoadSegments(ehdr);
+  Elf64_Addr base_addr = 0;
+  auto [ loadseg_last_addr, loadseg_err] = CopyLoadSegments(ehdr, base_addr);
+  if (loadseg_err) {
+    Log(kError, "Failed to copy load segments: %s\n", loadseg_err.Name());
+    return { 0, loadseg_err};
+  }
+
+  auto [ dynseg_last_addr, dynseg_err] = CopyDynamicSegment(ehdr, base_addr, 0);
+  if (dynseg_err) {
+    Log(kError, "Failed to copy dynamic segment: %s line %d\n", dynseg_err.Name(), dynseg_err.Line());
+    return { 0, dynseg_err};
+  }
+
+  return {std::max(loadseg_last_addr, dynseg_last_addr), MAKE_ERROR(Error::kSuccess)};
 }
 
 WithError<PageMapEntry*> SetupPML4(Task& current_task) {
