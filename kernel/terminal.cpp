@@ -21,7 +21,7 @@
 #include "usb/xhci/xhci.hpp"
 
 #include "hypervisor/hypervisor.hpp"
-
+#include "crypto/verify.hpp"
 namespace {
 WithError<uint64_t> CopyDynamicSegment(Elf64_Ehdr *ehdr, Elf64_Addr base_offset, LibraryInfo *lib_info);
 
@@ -98,7 +98,7 @@ WithError<uint64_t> CopyLoadSegments(Elf64_Ehdr* ehdr, Elf64_Addr base_offset) {
   uint64_t last_addr = 0;
   for (int i = 0; i < ehdr->e_phnum; ++i) {
     if (phdr[i].p_type != PT_LOAD) continue;
-    
+
     LinearAddress4Level dest_addr;
     dest_addr.value = phdr[i].p_vaddr + base_offset;
     last_addr = std::max(last_addr, phdr[i].p_vaddr + base_offset + phdr[i].p_memsz);
@@ -263,7 +263,7 @@ WithError<uint64_t> CopyDynamicSegment(Elf64_Ehdr *ehdr, Elf64_Addr base_offset,
   for (int j = 0; j < num_needed; j++) {
     auto offset = dyna_sgement_entry[needed_tag_list[j]].d_un.d_val;
     auto lib_name = reinterpret_cast<uint8_t*>(str_table_addres) + offset;
-    
+
     auto libs_entry = fat::FindFile("libs");
     if (libs_entry.first == nullptr ||
         libs_entry.first->attr != fat::Attribute::kDirectory) {
@@ -277,7 +277,29 @@ WithError<uint64_t> CopyDynamicSegment(Elf64_Ehdr *ehdr, Elf64_Addr base_offset,
     }
     std::vector<uint8_t> file_buf(file_entry->file_size);
     fat::LoadFile(&file_buf[0], file_buf.size(), *file_entry);
-    
+
+    std::string chk_name = std::string(reinterpret_cast<char *>(lib_name));
+    size_t dot_pos = chk_name.find_last_of('.');
+    if (dot_pos != std::string::npos) {
+      chk_name.replace(dot_pos, std::string::npos, ".chk");
+    } else {
+      chk_name += ".chk";
+    }
+
+    auto [chk_file_entry, chk_post_slash] = fat::FindFile(chk_name.c_str(), libs_entry.first->FirstCluster());
+    if (!chk_file_entry) {
+      Log(kError, "Failed to find checksum file: %s\n", chk_name.c_str());
+      return {0, MAKE_ERROR(Error::kInvalidFormat)};
+    }
+    std::vector<uint8_t> chk_file_buf(chk_file_entry->file_size);
+    fat::LoadFile(&chk_file_buf[0], chk_file_buf.size(), *chk_file_entry);
+
+    auto verify_result = VerifyModuleSignature(file_buf, chk_file_buf);
+    if (verify_result.error) {
+      Log(kError, "Signature verification failed for %s: %s\n", lib_name, verify_result.error.Name());
+      return {0, MAKE_ERROR(Error::kInvalidFormat)};
+    }
+
     auto elf_header = reinterpret_cast<Elf64_Ehdr*>(&file_buf[0]);
     lib_infos[j].lib_base = (last_addr + 0x0fff) & 0xffff'ffff'ffff'f000;
     if (auto err = LoadLib(elf_header, &lib_infos[j], &last_addr)) {
@@ -315,7 +337,6 @@ WithError<uint64_t> CopyDynamicSegment(Elf64_Ehdr *ehdr, Elf64_Addr base_offset,
 
 
 WithError<uint64_t> LoadELF(Elf64_Ehdr* ehdr) {
-  SetLogLevel(kInfo);
   if (ehdr->e_type != ET_EXEC) {
     return { 0, MAKE_ERROR(Error::kInvalidFormat) };
   }

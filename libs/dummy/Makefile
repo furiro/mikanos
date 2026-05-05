@@ -1,10 +1,10 @@
-TARGET = libver.so
-OBJS = libver.o
+TARGET = dummy.so
+OBJS = dummy.o
 
 
-.PHONY: all libver
+.PHONY: all dummy
 all: $(TARGET)
-libver: $(TARGET)
+dummy: $(TARGET)
 
 
 $(TARGET): $(OBJS) Makefile

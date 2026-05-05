@@ -7,7 +7,9 @@ OBJS = main.o graphics.o mouse.o font.o hankaku.o newlib_support.o console.o \
        usb/xhci/port.o usb/xhci/device.o usb/xhci/devmgr.o usb/xhci/registers.o \
        usb/classdriver/base.o usb/classdriver/hid.o usb/classdriver/keyboard.o \
        usb/classdriver/mouse.o usb/classdriver/cdc.o \
-	   hypervisor/hypervisor.o hypervisor/asms.o hypervisor/vmexit.o
+	   hypervisor/hypervisor.o hypervisor/asms.o hypervisor/vmexit.o \
+	   crypto/verify.o crypto/monocypher-4.0.2/src/monocypher.o crypto/monocypher-4.0.2/src/monocypher-ed25519.o
+
 DEPENDS = $(join $(dir $(OBJS)),$(addprefix .,$(notdir $(OBJS:.o=.d))))
 
 CPPFLAGS += -I.

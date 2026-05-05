@@ -2,3 +2,4 @@
 
 int GetVersion();
 
+int GetCpuNumber(int pl_number);

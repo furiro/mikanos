@@ -233,7 +233,6 @@ bool VmcsConfiguration() {
     const uint32_t tr_limit = GetSegmentLimitGdtOnly(gdtr, tr);
     const uint32_t ldtr_limit = (ldtr != 0) ? GetSegmentLimitGdtOnly(gdtr, ldtr) : 0;
 
-    SetLogLevel(kInfo);
     const uint32_t cs_ar = GetSegmentAccessRightsGdtOnly(gdtr, cs);
     const uint32_t ss_ar = GetSegmentAccessRightsGdtOnly(gdtr, ss);
     const uint32_t ds_ar = GetSegmentAccessRightsGdtOnly(gdtr, ds);

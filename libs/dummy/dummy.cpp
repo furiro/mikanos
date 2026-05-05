@@ -3,5 +3,5 @@ int GetVersion(){
 }
 
 int GetCpuNumber(int pl_number){
-    return (pl_number + 1) % 3;
+    return (pl_number + 2) % 3;
 }
