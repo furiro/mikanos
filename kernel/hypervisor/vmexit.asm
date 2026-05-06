@@ -25,6 +25,25 @@ vmexit_entry:
     sub rsp, 8
     call vmexit_handler_c
 
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    vmresume
+
 .loop:
     hlt
     jmp .loop

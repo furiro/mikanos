@@ -946,9 +946,10 @@ void Terminal::ExecuteLine() {
       }
       PrintToFD(*files_[1], "exit_code=%d\n", code);
     }();
-  } else if (strcmp(command, "hyper") == 0) {
-    PrintToFD(*files_[2], "hyper\n");
-    HypervisorMain();
+  } else if (strcmp(command, "hlt") == 0) {
+    PrintToFD(*files_[2], "hlt\n");
+    asm volatile("hlt");
+    // HypervisorMain();
   } else if (command[0] != 0) {
     auto file_entry = FindCommand(command);
     if (!file_entry) {

@@ -39,6 +39,8 @@
 #include "syscall.hpp"
 #include "uefi.hpp"
 
+#include "hypervisor/hypervisor.hpp"
+
 __attribute__((format(printf, 1, 2))) int printk(const char* format, ...) {
   va_list ap;
   int result;
@@ -177,45 +179,29 @@ void TaskWallclock(uint64_t task_id, int64_t data) {
   }
 }
 
-extern "C" void KernelMainNewStack(
-    const FrameBufferConfig& frame_buffer_config_ref,
-    const MemoryMap& memory_map_ref,
-    const acpi::RSDP& acpi_table,
-    void* volume_image,
-    EFI_RUNTIME_SERVICES* rt) {
-  MemoryMap memory_map{memory_map_ref};
-  uefi_rt = rt;
+FrameBufferConfig frame_buffer_config;
+MemoryMap         memory_map;
+acpi::RSDP        acpi_table;
+uint8_t*          boot_volume_image;
 
-  InitializeGraphics(frame_buffer_config_ref);
-  InitializeConsole();
 
-  printk("Welcome to MikanOS!\n");
+extern "C" void GuestKernelMain() {
   SetLogLevel(kWarn);
+  printk("GuestKernelMain started\n");
 
-  InitializeSegmentation();
-  InitializePaging();
-  InitializeMemoryManager(memory_map);
-  InitializeTSS();
-  InitializeInterrupt();
-
-  fat::Initialize(volume_image);
-  InitializeFont();
-  InitializePCI();
-
-  InitializeLayer();
   InitializeMainWindow();
   InitializeTextWindow();
   layer_manager->Draw({{0, 0}, ScreenSize()});
-
+  
   acpi::Initialize(acpi_table);
+  Log(kInfo, "ACPI initialized\n");
   InitializeLAPICTimer();
+  Log(kInfo, "LAPIC timer initialized\n");
 
   const int kTextboxCursorTimer = 1;
   const int kTimer05Sec = static_cast<int>(kTimerFreq * 0.5);
   timer_manager->AddTimer(Timer{kTimer05Sec, kTextboxCursorTimer, 1});
   bool textbox_cursor_visible = false;
-
-  InitializeSyscall();
 
   InitializeTask();
   Task& main_task = task_manager->CurrentTask();
@@ -305,6 +291,42 @@ extern "C" void KernelMainNewStack(
       Log(kError, "Unknown message type: %d\n", msg->type);
     }
   }
+}
+
+extern "C" void KernelMainNewStack(
+    const FrameBufferConfig& frame_buffer_config_ref,
+    const MemoryMap& memory_map_ref,
+    const acpi::RSDP& acpi_table_ref,
+    void* volume_image,
+    EFI_RUNTIME_SERVICES* rt) {
+  frame_buffer_config = frame_buffer_config_ref;
+  memory_map = memory_map_ref;
+  acpi_table = acpi_table_ref;
+  boot_volume_image = static_cast<uint8_t*>(volume_image);
+  uefi_rt = rt;
+
+
+  InitializeGraphics(frame_buffer_config_ref);
+  InitializeConsole();
+
+  printk("Welcome to MikanOS!\n");
+  SetLogLevel(kWarn);
+
+  InitializeSegmentation();
+  InitializePaging();
+  InitializeMemoryManager(memory_map);
+  InitializeTSS();
+  InitializeInterrupt();
+
+  fat::Initialize(volume_image);
+  InitializeFont();
+  InitializePCI();
+
+  InitializeLayer();
+  InitializeSyscall();
+
+  HypervisorMain(reinterpret_cast<uint64_t>(GuestKernelMain));
+
 }
 
 extern "C" void __cxa_pure_virtual() {

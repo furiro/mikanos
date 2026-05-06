@@ -5,6 +5,7 @@
  */
 
 #include "graphics.hpp"
+#include "logger.hpp"
 
 void RGBResv8BitPerColorPixelWriter::Write(Vector2D<int> pos, const PixelColor& c) {
   auto p = PixelAt(pos);

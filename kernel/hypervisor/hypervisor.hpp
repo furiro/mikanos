@@ -2,7 +2,7 @@
 #define HYPERVISOR_HPP
 
 #include <stdint.h>
-void HypervisorMain();
+void HypervisorMain(uint64_t guest_rip);
 
 
 #define BIT(n) (1ULL << (n))

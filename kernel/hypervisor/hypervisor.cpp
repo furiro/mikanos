@@ -22,6 +22,7 @@ alignas(16) uint8_t *vm_enter_stack;
 alignas(16) uint8_t *vm_exit_stack;
 
 extern "C" void vmexit_handler_c() {
+    SetLogLevel(kInfo);
     VmreadResult rr = vmread(VM_EXIT_REASON);
     if (rr.cf || rr.zf) {
         Log(kError, "VMREAD(VM_EXIT_REASON) failed cf=%u zf=%u\n", rr.cf, rr.zf);
@@ -34,10 +35,14 @@ extern "C" void vmexit_handler_c() {
     Log(kInfo, "VM-exit: reason=%u guest_rip=0x%llx inst_len=%u\n",
         reason, guest_rip, inst_len);
 
-    if (reason == EXIT_REASON_HLT) {
-        Log(kInfo, "Guest HLT exit: success\n");
-    } else {
-        Log(kInfo, "Unhandled exit reason=%u\n", reason);
+    switch (reason) {
+    case EXIT_REASON_HLT:
+        Log(kInfo, "Guest executed HLT instruction\n");
+        vmwrite_checked(GUEST_RIP, guest_rip + inst_len);
+        return;
+    default:
+        Log(kInfo, "Unhandled VM-exit reason=%u\n", reason);
+        break;
     }
 
     for (;;) {
@@ -181,7 +186,7 @@ bool vmwrite_checked(uint64_t field, uint64_t value) {
 }
 
 
-bool VmcsConfiguration() {
+bool VmcsConfiguration(uint64_t guest_rip) {
     bool success = true;
     
     const uint64_t vmx_basic = rdmsr(MSR_IA32_VMX_BASIC);
@@ -267,7 +272,7 @@ bool VmcsConfiguration() {
         vmx_basic
     );
 
-    procbased_ctls |= CPU_BASED_HLT_EXITING;
+    // procbased_ctls |= CPU_BASED_HLT_EXITING;
     procbased_ctls = AdjustVmxControlsTrue(
         procbased_ctls,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS,
@@ -319,8 +324,9 @@ bool VmcsConfiguration() {
 
     vm_enter_stack = reinterpret_cast<uint8_t*>(frame.value.Frame());
     memset(vm_enter_stack, 0, 0x100 * 0x1000);
-    success &= vmwrite_checked(GUEST_RSP, reinterpret_cast<uint64_t>(vm_enter_stack + 0x100 * 0x1000));
-    success &= vmwrite_checked(GUEST_RIP, reinterpret_cast<uint64_t>(GuestEntryPoint));
+    // GUEST_RSP is set to the top of the stack, and the first push in GuestEntryPoint will write below it.
+    success &= vmwrite_checked(GUEST_RSP, reinterpret_cast<uint64_t>(vm_enter_stack + 0x100 * 0x1000 - 8));
+    success &= vmwrite_checked(GUEST_RIP, reinterpret_cast<uint64_t>(guest_rip));
     success &= vmwrite_checked(GUEST_RFLAGS, 0x2);
 
     success &= WriteSegmentFields(GUEST_CS_SELECTOR, GUEST_CS_BASE, GUEST_CS_LIMIT, GUEST_CS_ACCESS_RIGHTS,
@@ -435,7 +441,7 @@ bool VmcsConfiguration() {
     return success;
 }
 
-void HypervisorMain() {
+void HypervisorMain(uint64_t guest_rip) {
     VMX_REGIONS* VmxonRegion = nullptr;
     VMX_REGIONS* VmcsRegion = nullptr;
 
@@ -491,7 +497,7 @@ void HypervisorMain() {
         return;
     }
 
-    if (!VmcsConfiguration()) {
+    if (!VmcsConfiguration(guest_rip)) {
         Log(kError, "VmcsConfiguration Fail\n");
         return;
     }
