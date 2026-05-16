@@ -188,6 +188,7 @@ uint8_t*          boot_volume_image;
 extern "C" void GuestKernelMain() {
   SetLogLevel(kWarn);
   printk("GuestKernelMain started\n");
+  InitializeSyscall();
 
   InitializeMainWindow();
   InitializeTextWindow();

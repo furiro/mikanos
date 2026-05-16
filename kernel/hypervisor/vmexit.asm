@@ -22,6 +22,8 @@ vmexit_entry:
     push r14
     push r15
 
+    mov rdi, rsp        ; 1st argument = VmExitContext*
+
     sub rsp, 8
     call vmexit_handler_c
 

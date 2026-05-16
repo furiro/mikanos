@@ -9,9 +9,6 @@
 #include "logger.hpp"
 
 namespace {
-  const uint64_t kPageSize4K = 4096;
-  const uint64_t kPageSize2M = 512 * kPageSize4K;
-  const uint64_t kPageSize1G = 512 * kPageSize2M;
 
   alignas(kPageSize4K) std::array<uint64_t, 512> pml4_table;
   alignas(kPageSize4K) std::array<uint64_t, 512> pdp_table;

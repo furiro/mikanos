@@ -9,7 +9,6 @@
 
 
 
-#define MSR_IA32_EFER                     0xc0000080U
 #define MSR_IA32_FS_BASE                  0xC0000100
 #define MSR_IA32_GS_BASE                  0xC0000101
 #define MSR_IA32_SYSENTER_CS              0x174
@@ -46,4 +45,12 @@
 #define MSR_IA32_VMX_PROCBASED_CTLS3	0x00000492
 
 #define MSR_IA32_MCU_STAGING_MBOX_ADDR	0x000007a5
+
+
+struct VmxMsrEntry {
+    uint32_t msr_index;
+    uint32_t reserved;
+    uint64_t value;
+};
+
 #endif

@@ -11,6 +11,11 @@
 
 #include "error.hpp"
 
+const uint64_t kPageSize4K = 4096;
+const uint64_t kPageSize2M = 512 * kPageSize4K;
+const uint64_t kPageSize1G = 512 * kPageSize2M;
+
+
 /** @brief 静的に確保するページディレクトリの個数
  *
  * この定数は SetupIdentityPageMap で使用される．

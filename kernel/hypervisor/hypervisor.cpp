@@ -3,6 +3,8 @@
 #include "../memory_manager.hpp"
 #include "../logger.hpp"
 #include "../segment.hpp"
+#include "../paging.hpp"
+#include "../msr.hpp"
 #include "msr_index.h"
 #include "vmexit.h"
 // #include "file.hpp"
@@ -21,7 +23,7 @@ __attribute__((naked)) void GuestEntryPoint() {
 alignas(16) uint8_t *vm_enter_stack;
 alignas(16) uint8_t *vm_exit_stack;
 
-extern "C" void vmexit_handler_c() {
+extern "C" void vmexit_handler_c(VmExitContext*context) {
     SetLogLevel(kInfo);
     VmreadResult rr = vmread(VM_EXIT_REASON);
     if (rr.cf || rr.zf) {
@@ -35,19 +37,30 @@ extern "C" void vmexit_handler_c() {
     Log(kInfo, "VM-exit: reason=%u guest_rip=0x%llx inst_len=%u\n",
         reason, guest_rip, inst_len);
 
-    switch (reason) {
-    case EXIT_REASON_HLT:
-        Log(kInfo, "Guest executed HLT instruction\n");
-        vmwrite_checked(GUEST_RIP, guest_rip + inst_len);
-        return;
-    default:
-        Log(kInfo, "Unhandled VM-exit reason=%u\n", reason);
-        break;
+    switch (reason) {    
+        case EXIT_REASON_HLT:
+        { 
+            Log(kInfo, "Guest executed HLT instruction\n");
+            break;
+        }
+        case EXIT_REASON_WRMSR:
+        {
+            if (!vmexit_handler_msr(context)) {
+                Log(kError, "vmexit_handler_msr failed\n");
+                for (;;) asm volatile("hlt");
+            }
+            break;
+        }
+        default:
+        {
+            Log(kInfo, "Unhandled VM-exit reason=%u\n", reason);
+            for (;;) asm volatile("hlt");
+            break;
+        }
     }
 
-    for (;;) {
-        asm volatile("hlt");
-    }
+    vmwrite_checked(GUEST_RIP, guest_rip + inst_len);
+    return;
 }
 
 uint32_t AdjustVmxControls(uint32_t requested, uint32_t msr_index) {
@@ -186,6 +199,49 @@ bool vmwrite_checked(uint64_t field, uint64_t value) {
 }
 
 
+#define TEMP_READ BIT(0)
+#define TEMP_WRITE BIT(1)
+#define TEMP_EXECUTE BIT(2)
+#define TEMP_ALL (TEMP_READ | TEMP_WRITE | TEMP_EXECUTE)
+#define TEMP_WB 6 << 3
+#define TEMP_LARGE_PAGE BIT(7)
+
+bool vmwrite_EPT() {
+
+    auto ept_pml4_frame = memory_manager->Allocate(1);
+    if (ept_pml4_frame.error) {
+        Log(kError, "malloc error\n");
+        return false;
+    }
+    auto ept_pml4 = reinterpret_cast<uint64_t*>(ept_pml4_frame.value.Frame());
+
+    auto ept_pdpt_frame = memory_manager->Allocate(1);
+    if (ept_pdpt_frame.error) {
+        Log(kError, "malloc error\n");
+        return false;
+    }
+    auto ept_pdpt = reinterpret_cast<uint64_t*>(ept_pdpt_frame.value.Frame());
+
+    auto ept_pd_frame = memory_manager->Allocate(1 * 512);
+    if (ept_pd_frame.error) {
+        Log(kError, "malloc error\n");
+        return false;
+    }
+    auto ept_pd = reinterpret_cast<uint64_t*>(ept_pd_frame.value.Frame());
+
+    ept_pml4[0] = (reinterpret_cast<uint64_t>(ept_pdpt) & 0x000ffffffffff000) | TEMP_ALL;
+    for (auto i_ept_pdpt = 0; i_ept_pdpt < 512; ++i_ept_pdpt) {
+        ept_pdpt[i_ept_pdpt] = (reinterpret_cast<uint64_t>(&ept_pd[i_ept_pdpt * 512]) & 0x000ffffffffff000) | TEMP_ALL;
+        for (auto i_ept_pd = 0; i_ept_pd < 512; ++i_ept_pd) {
+            ept_pd[i_ept_pdpt * 512 + i_ept_pd] = (i_ept_pdpt * kPageSize1G) + (i_ept_pd * kPageSize2M) | TEMP_ALL | TEMP_LARGE_PAGE | TEMP_WB;
+        }
+    }
+
+    const uint64_t eptp =
+    (reinterpret_cast<uint64_t>(ept_pml4) & 0x000ffffffffff000ULL)| 0x1e;
+    return vmwrite_checked(EPT_POINTER, eptp);
+}
+
 bool VmcsConfiguration(uint64_t guest_rip) {
     bool success = true;
     
@@ -199,7 +255,7 @@ bool VmcsConfiguration(uint64_t guest_rip) {
     const uint64_t cr4 = read_cr4();
     const uint64_t rsp = read_rsp();
     const uint64_t rflags = read_rflags();
-    const uint64_t efer = rdmsr(MSR_IA32_EFER);
+    const uint64_t efer = rdmsr(kIA32_EFER);
     
     const uint16_t cs = read_cs();
     const uint16_t ss = read_ss();
@@ -273,19 +329,31 @@ bool VmcsConfiguration(uint64_t guest_rip) {
     );
 
     // procbased_ctls |= CPU_BASED_HLT_EXITING;
+    uint32_t procbased_ctls_request = CPU_BASED_ACTIVATE_SECONDARY_CONTROLS;
+    procbased_ctls |= procbased_ctls_request;
     procbased_ctls = AdjustVmxControlsTrue(
         procbased_ctls,
         MSR_IA32_VMX_TRUE_PROCBASED_CTLS,
         MSR_IA32_VMX_PROCBASED_CTLS,
         vmx_basic
     );
+    if ((procbased_ctls & procbased_ctls_request) != procbased_ctls_request) {
+        Log(kError, "Some of the requested procbased controls are not supported by this processor.\n");
+        return false;
+    }
 
     // Secondary controls are active only if primary bit31 is set.
-    if (procbased_ctls & CPU_BASED_ACTIVATE_SECONDARY) {
+    uint32_t procbased_ctls2_request = SECONDARY_EXEC_ENABLE_EPT;
+    if (procbased_ctls & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
+        procbased_ctls2 |= procbased_ctls2_request;
         procbased_ctls2 = AdjustVmxControls(
             procbased_ctls2,
             MSR_IA32_VMX_PROCBASED_CTLS2
         );
+        if ((procbased_ctls2 & procbased_ctls2_request) != procbased_ctls2_request) {
+            Log(kError, "Some of the requested secondary procbased controls are not supported by this processor.\n");
+            return false;
+        }
     } else {
         procbased_ctls2 = 0;
     }
@@ -403,14 +471,21 @@ bool VmcsConfiguration(uint64_t guest_rip) {
     success &= vmwrite_checked(HOST_IA32_SYSENTER_CS,  rdmsr(MSR_IA32_SYSENTER_CS));
     success &= vmwrite_checked(HOST_IA32_SYSENTER_ESP, rdmsr(MSR_IA32_SYSENTER_ESP));
     success &= vmwrite_checked(HOST_IA32_SYSENTER_EIP, rdmsr(MSR_IA32_SYSENTER_EIP));
+
     //
     // VM-execution control fields
     //
-    success &= vmwrite_checked(PIN_BASED_VM_EXEC_CONTROL, pinbased_ctls);
-    success &= vmwrite_checked(CPU_BASED_VM_EXEC_CONTROL, procbased_ctls);
-    if (procbased_ctls & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
-        success &= vmwrite_checked(SECONDARY_VM_EXEC_CONTROL, procbased_ctls2);
-    }
+
+    VmEnterMsrLoadArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
+    VmExitMsrStoreArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
+    VmExitMsrLoadArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
+    success &= vmwrite_checked(VM_ENTRY_MSR_LOAD_ADDR, reinterpret_cast<uint64_t>(VmEnterMsrLoadArea));
+    success &= vmwrite_checked(VM_ENTRY_MSR_LOAD_COUNT, VmEnterMsrLoadCount);
+    success &= vmwrite_checked(VM_EXIT_MSR_STORE_ADDR, reinterpret_cast<uint64_t>(VmExitMsrStoreArea));
+    success &= vmwrite_checked(VM_EXIT_MSR_STORE_COUNT, VmExitMsrStoreCount);
+    success &= vmwrite_checked(VM_EXIT_MSR_LOAD_ADDR, reinterpret_cast<uint64_t>(VmExitMsrLoadArea));
+    success &= vmwrite_checked(VM_EXIT_MSR_LOAD_COUNT, VmExitMsrLoadCount);
+
 
     success &= vmwrite_checked(EXCEPTION_BITMAP, 0);
     success &= vmwrite_checked(PAGE_FAULT_ERROR_CODE_MASK, 0);
@@ -438,6 +513,15 @@ bool VmcsConfiguration(uint64_t guest_rip) {
     success &= vmwrite_checked(CR0_READ_SHADOW, cr0);
     success &= vmwrite_checked(CR4_READ_SHADOW, cr4);
 
+    // 今後、ここの前でEPT等の対応をする
+    success &= vmwrite_checked(PIN_BASED_VM_EXEC_CONTROL, pinbased_ctls);
+    success &= vmwrite_checked(CPU_BASED_VM_EXEC_CONTROL, procbased_ctls);
+    if (procbased_ctls & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
+        success &= vmwrite_checked(SECONDARY_VM_EXEC_CONTROL, procbased_ctls2);
+        if (procbased_ctls2 & SECONDARY_EXEC_ENABLE_EPT) {
+            success &= vmwrite_EPT();
+        }
+    }
     return success;
 }
 
