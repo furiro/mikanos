@@ -10,8 +10,7 @@ OBJS_KERNEL = main.o graphics.o mouse.o font.o hankaku.o newlib_support.o consol
 	   hypervisor/hypervisor.o hypervisor/asms.o hypervisor/vmexit.o hypervisor/vmexit_msr.o\
 	   crypto/verify.o crypto/monocypher-4.0.2/src/monocypher.o crypto/monocypher-4.0.2/src/monocypher-ed25519.o
 
-OBJS_HYPERVISOR = hypervisor/hypervisor.o hypervisor/asms.o hypervisor/vmexit.o hypervisor/vmexit_msr.o \
-		main.o graphics.o mouse.o font.o hankaku.o newlib_support.o console.o \
+OBJS_HYPERVISOR = main.o graphics.o mouse.o font.o hankaku.o newlib_support.o console.o \
        pci.o asmfunc.o libcxx_support.o logger.o interrupt.o segment.o paging.o memory_manager.o \
        window.o layer.o timer.o frame_buffer.o acpi.o keyboard.o task.o terminal.o \
        fat.o syscall.o file.o \
@@ -19,6 +18,7 @@ OBJS_HYPERVISOR = hypervisor/hypervisor.o hypervisor/asms.o hypervisor/vmexit.o 
        usb/xhci/port.o usb/xhci/device.o usb/xhci/devmgr.o usb/xhci/registers.o \
        usb/classdriver/base.o usb/classdriver/hid.o usb/classdriver/keyboard.o \
        usb/classdriver/mouse.o usb/classdriver/cdc.o \
+	   hypervisor/hypervisor.o hypervisor/asms.o hypervisor/vmexit.o hypervisor/vmexit_msr.o\
 	   crypto/verify.o crypto/monocypher-4.0.2/src/monocypher.o crypto/monocypher-4.0.2/src/monocypher-ed25519.o
 
 
@@ -29,7 +29,7 @@ CFLAGS_KERNEL   = $(CFLAGS) -O2 -Wall -g --target=x86_64-elf -ffreestanding -mno
 CXXFLAGS_KERNEL = $(CXXFLAGS) -O2 -Wall -g --target=x86_64-elf -ffreestanding -mno-red-zone -fshort-wchar \
             -fno-exceptions -fno-rtti -std=c++17
 LDFLAGS_KERNEL  = $(LDFLAGS) --entry KernelMain -z norelro --image-base 0x100000 --static
-LDFLAGS_HYPERVISOR = $(LDFLAGS) --entry HypervisorMain -z norelro --image-base 0xC00000 --static
+LDFLAGS_HYPERVISOR = $(LDFLAGS) --entry KernelMain -z norelro --image-base 0x1400000 --static
 
 
 .PHONY: all

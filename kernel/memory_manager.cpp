@@ -51,6 +51,18 @@ void BitmapMemoryManager::SetMemoryRange(FrameID range_begin, FrameID range_end)
   range_end_ = range_end;
 }
 
+void BitmapMemoryManager::ExportAllocateMap(MapTableArrayType* dst) {
+  for (size_t i = 0; i < dst->size(); ++i) {
+    (*dst)[i] = alloc_map_[i];
+  }
+}
+
+void BitmapMemoryManager::ImportAllocateMap(const MapTableArrayType& src) {
+  for (size_t i = 0; i < alloc_map_.size(); ++i) {
+    alloc_map_[i] = src[i];
+  }
+}
+
 MemoryStat BitmapMemoryManager::Stat() const {
   size_t sum = 0;
   for (int i = range_begin_.ID() / kBitsPerMapLine;

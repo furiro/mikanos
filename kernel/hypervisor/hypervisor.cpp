@@ -5,6 +5,7 @@
 #include "../segment.hpp"
 #include "../paging.hpp"
 #include "../msr.hpp"
+#include "../memory_map.hpp"
 #include "msr_index.h"
 #include "vmexit.h"
 // #include "file.hpp"
@@ -58,6 +59,7 @@ extern "C" void vmexit_handler_c(VmExitContext*context) {
             break;
         }
     }
+    SetLogLevel(kWarn);
 
     vmwrite_checked(GUEST_RIP, guest_rip + inst_len);
     return;
@@ -206,8 +208,8 @@ bool vmwrite_checked(uint64_t field, uint64_t value) {
 #define TEMP_WB 6 << 3
 #define TEMP_LARGE_PAGE BIT(7)
 
-bool vmwrite_EPT() {
 
+bool vmwrite_EPT() {
     auto ept_pml4_frame = memory_manager->Allocate(1);
     if (ept_pml4_frame.error) {
         Log(kError, "malloc error\n");
@@ -242,9 +244,14 @@ bool vmwrite_EPT() {
     return vmwrite_checked(EPT_POINTER, eptp);
 }
 
-bool VmcsConfiguration(uint64_t guest_rip) {
+bool VmcsConfiguration(uint64_t guest_rip, VM_ENTER_CONTEXT context) {
     bool success = true;
-    
+
+    VmEnterMsrLoadArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
+    VmExitMsrStoreArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
+    VmExitMsrLoadArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
+
+
     const uint64_t vmx_basic = rdmsr(MSR_IA32_VMX_BASIC);
 
     //
@@ -373,67 +380,6 @@ bool VmcsConfiguration(uint64_t guest_rip) {
     );
 
     //
-    // Guest-state area
-    // Guest = current state
-    //
-
-    success &= vmwrite_checked(GUEST_CR0, cr0);
-    success &= vmwrite_checked(GUEST_CR3, cr3);
-    success &= vmwrite_checked(GUEST_CR4, cr4);
-
-    success &= vmwrite_checked(GUEST_DR7, read_dr7());
-
-    // num_frames = total size / page size
-    auto frame = memory_manager->Allocate(0x100);
-    if (frame.error) {
-        Log(kError, "malloc error\n");
-        return false;
-    }
-
-    vm_enter_stack = reinterpret_cast<uint8_t*>(frame.value.Frame());
-    memset(vm_enter_stack, 0, 0x100 * 0x1000);
-    // GUEST_RSP is set to the top of the stack, and the first push in GuestEntryPoint will write below it.
-    success &= vmwrite_checked(GUEST_RSP, reinterpret_cast<uint64_t>(vm_enter_stack + 0x100 * 0x1000 - 8));
-    success &= vmwrite_checked(GUEST_RIP, reinterpret_cast<uint64_t>(guest_rip));
-    success &= vmwrite_checked(GUEST_RFLAGS, 0x2);
-
-    success &= WriteSegmentFields(GUEST_CS_SELECTOR, GUEST_CS_BASE, GUEST_CS_LIMIT, GUEST_CS_ACCESS_RIGHTS,
-                       cs, cs_base, cs_limit, cs_ar);
-    success &= WriteSegmentFields(GUEST_SS_SELECTOR, GUEST_SS_BASE, GUEST_SS_LIMIT, GUEST_SS_ACCESS_RIGHTS,
-                       ss, ss_base, ss_limit, ss_ar);
-    success &= WriteSegmentFields(GUEST_DS_SELECTOR, GUEST_DS_BASE, GUEST_DS_LIMIT, GUEST_DS_ACCESS_RIGHTS,
-                       ds, ds_base, ds_limit, ds_ar);
-    success &= WriteSegmentFields(GUEST_ES_SELECTOR, GUEST_ES_BASE, GUEST_ES_LIMIT, GUEST_ES_ACCESS_RIGHTS,
-                       es, es_base, es_limit, es_ar);
-    success &= WriteSegmentFields(GUEST_FS_SELECTOR, GUEST_FS_BASE, GUEST_FS_LIMIT, GUEST_FS_ACCESS_RIGHTS,
-                       fs, fs_base, fs_limit, fs_ar);
-    success &= WriteSegmentFields(GUEST_GS_SELECTOR, GUEST_GS_BASE, GUEST_GS_LIMIT, GUEST_GS_ACCESS_RIGHTS,
-                       gs, gs_base, gs_limit, gs_ar);
-    success &= WriteSegmentFields(GUEST_TR_SELECTOR, GUEST_TR_BASE, GUEST_TR_LIMIT, GUEST_TR_ACCESS_RIGHTS,
-                       tr, tr_base, tr_limit, tr_ar);
-    success &= WriteSegmentFields(GUEST_LDTR_SELECTOR, GUEST_LDTR_BASE, GUEST_LDTR_LIMIT, GUEST_LDTR_ACCESS_RIGHTS,
-                       ldtr, ldtr_base, ldtr_limit, ldtr_ar);
-
-    success &= vmwrite_checked(GUEST_GDTR_BASE, gdtr.base);
-    success &= vmwrite_checked(GUEST_GDTR_LIMIT, gdtr.limit);
-    success &= vmwrite_checked(GUEST_IDTR_BASE, idtr.base);
-    success &= vmwrite_checked(GUEST_IDTR_LIMIT, idtr.limit);
-
-    success &= vmwrite_checked(GUEST_SYSENTER_CS, rdmsr(MSR_IA32_SYSENTER_CS));
-    success &= vmwrite_checked(GUEST_SYSENTER_ESP, rdmsr(MSR_IA32_SYSENTER_ESP));
-    success &= vmwrite_checked(GUEST_SYSENTER_EIP, rdmsr(MSR_IA32_SYSENTER_EIP));
-
-    success &= vmwrite_checked(GUEST_IA32_EFER, efer);
-
-    success &= vmwrite_checked(VMCS_LINK_POINTER, ~0ULL);
-
-    success &= vmwrite_checked(GUEST_ACTIVITY_STATE, 0);
-    success &= vmwrite_checked(GUEST_INTERRUPTIBILITY_STATE, 0);
-    success &= vmwrite_checked(GUEST_PENDING_DBG_EXCEPTIONS, 0);
-    success &= vmwrite_checked(GUEST_VMCS_PREEMPTION_TIMER_VALUE, 0);
-
-
-    //
     // Host-state area
     //
     success &= vmwrite_checked(HOST_CR0, cr0);
@@ -456,7 +402,7 @@ bool VmcsConfiguration(uint64_t guest_rip) {
 
 
     // num_frames = total size / page size
-    frame = memory_manager->Allocate(0x100);
+    WithError<FrameID> frame = memory_manager->Allocate(0x100);
     if (frame.error) {
         Log(kError, "malloc error\n");
         return false;
@@ -476,9 +422,6 @@ bool VmcsConfiguration(uint64_t guest_rip) {
     // VM-execution control fields
     //
 
-    VmEnterMsrLoadArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
-    VmExitMsrStoreArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
-    VmExitMsrLoadArea = reinterpret_cast<VmxMsrEntry*>(memory_manager->Allocate(1).value.Frame());
     success &= vmwrite_checked(VM_ENTRY_MSR_LOAD_ADDR, reinterpret_cast<uint64_t>(VmEnterMsrLoadArea));
     success &= vmwrite_checked(VM_ENTRY_MSR_LOAD_COUNT, VmEnterMsrLoadCount);
     success &= vmwrite_checked(VM_EXIT_MSR_STORE_ADDR, reinterpret_cast<uint64_t>(VmExitMsrStoreArea));
@@ -522,10 +465,98 @@ bool VmcsConfiguration(uint64_t guest_rip) {
             success &= vmwrite_EPT();
         }
     }
+
+
+    //
+    // Guest-state area
+    // Guest = current state
+    //
+
+    success &= vmwrite_checked(GUEST_CR0, cr0);
+    success &= vmwrite_checked(GUEST_CR3, cr3);
+    success &= vmwrite_checked(GUEST_CR4, cr4);
+
+    success &= vmwrite_checked(GUEST_DR7, read_dr7());
+
+    // num_frames = total size / page size
+    // 400 kB
+    frame = memory_manager->Allocate(0x100);
+    if (frame.error) {
+        Log(kError, "malloc error\n");
+        return false;
+    }
+
+    vm_enter_stack = reinterpret_cast<uint8_t*>(frame.value.Frame());
+    memset(vm_enter_stack, 0, 0x100 * 0x1000);
+    // GUEST_RSP is set to the top of the stack, and the first push in GuestEntryPoint will write below it.
+    // 
+    // Guest Stack COnfiguration:
+    //
+    // +---------------------------------------+ <- GUEST_RSP (vm_enter_stack + 0x100 * 0x1000 - 8)
+    // | pointer to VM_ENTER_CONTEXT (context) |    This is for the guest to know where the VM_ENTER_CONTEXT is
+    // +---------------------------------------+
+    // |(unused)                               |
+    // +---------------------------------------+
+    // | VM_ENTER_CONTEXT (context)            |    This is for the guest to know the initial state of the guest, and other information.
+    // +---------------------------------------+ <- vm_enter_stack
+    //
+    auto allocate_map = memory_manager->Allocate( (sizeof(BitmapMemoryManager::MapTableArrayType) + 0xFFF)/ 0x1000);
+    if (allocate_map.error) {
+        Log(kError, "malloc error\n");
+        return false;
+    }
+
+    memory_manager->ExportAllocateMap(reinterpret_cast<BitmapMemoryManager::MapTableArrayType*>(allocate_map.value.Frame()));
+    context.Arg6 = reinterpret_cast<uint64_t>(allocate_map.value.Frame());
+    *reinterpret_cast<VM_ENTER_CONTEXT*>(vm_enter_stack) = context;
+    *reinterpret_cast<uint64_t*>(vm_enter_stack + 0x100 * 0x1000 - 8) = reinterpret_cast<uint64_t>(vm_enter_stack);
+    // ここで、メモリマップを渡す必要があるので、ここまでに、メモリマップを作成しておく必要がある。
+    success &= vmwrite_checked(GUEST_RSP, reinterpret_cast<uint64_t>(vm_enter_stack + 0x100 * 0x1000 - 8));
+    success &= vmwrite_checked(GUEST_RIP, reinterpret_cast<uint64_t>(guest_rip));
+    success &= vmwrite_checked(GUEST_RFLAGS, 0x2);
+
+    success &= WriteSegmentFields(GUEST_CS_SELECTOR, GUEST_CS_BASE, GUEST_CS_LIMIT, GUEST_CS_ACCESS_RIGHTS,
+                       cs, cs_base, cs_limit, cs_ar);
+    success &= WriteSegmentFields(GUEST_SS_SELECTOR, GUEST_SS_BASE, GUEST_SS_LIMIT, GUEST_SS_ACCESS_RIGHTS,
+                       ss, ss_base, ss_limit, ss_ar);
+    success &= WriteSegmentFields(GUEST_DS_SELECTOR, GUEST_DS_BASE, GUEST_DS_LIMIT, GUEST_DS_ACCESS_RIGHTS,
+                       ds, ds_base, ds_limit, ds_ar);
+    success &= WriteSegmentFields(GUEST_ES_SELECTOR, GUEST_ES_BASE, GUEST_ES_LIMIT, GUEST_ES_ACCESS_RIGHTS,
+                       es, es_base, es_limit, es_ar);
+    success &= WriteSegmentFields(GUEST_FS_SELECTOR, GUEST_FS_BASE, GUEST_FS_LIMIT, GUEST_FS_ACCESS_RIGHTS,
+                       fs, fs_base, fs_limit, fs_ar);
+    success &= WriteSegmentFields(GUEST_GS_SELECTOR, GUEST_GS_BASE, GUEST_GS_LIMIT, GUEST_GS_ACCESS_RIGHTS,
+                       gs, gs_base, gs_limit, gs_ar);
+    success &= WriteSegmentFields(GUEST_TR_SELECTOR, GUEST_TR_BASE, GUEST_TR_LIMIT, GUEST_TR_ACCESS_RIGHTS,
+                       tr, tr_base, tr_limit, tr_ar);
+    success &= WriteSegmentFields(GUEST_LDTR_SELECTOR, GUEST_LDTR_BASE, GUEST_LDTR_LIMIT, GUEST_LDTR_ACCESS_RIGHTS,
+                       ldtr, ldtr_base, ldtr_limit, ldtr_ar);
+
+    success &= vmwrite_checked(GUEST_GDTR_BASE, gdtr.base);
+    success &= vmwrite_checked(GUEST_GDTR_LIMIT, gdtr.limit);
+    success &= vmwrite_checked(GUEST_IDTR_BASE, idtr.base);
+    success &= vmwrite_checked(GUEST_IDTR_LIMIT, idtr.limit);
+
+    success &= vmwrite_checked(GUEST_SYSENTER_CS, rdmsr(MSR_IA32_SYSENTER_CS));
+    success &= vmwrite_checked(GUEST_SYSENTER_ESP, rdmsr(MSR_IA32_SYSENTER_ESP));
+    success &= vmwrite_checked(GUEST_SYSENTER_EIP, rdmsr(MSR_IA32_SYSENTER_EIP));
+
+    success &= vmwrite_checked(GUEST_IA32_EFER, efer);
+
+    success &= vmwrite_checked(VMCS_LINK_POINTER, ~0ULL);
+
+    success &= vmwrite_checked(GUEST_ACTIVITY_STATE, 0);
+    success &= vmwrite_checked(GUEST_INTERRUPTIBILITY_STATE, 0);
+    success &= vmwrite_checked(GUEST_PENDING_DBG_EXCEPTIONS, 0);
+    success &= vmwrite_checked(GUEST_VMCS_PREEMPTION_TIMER_VALUE, 0);
+
+
+
+
     return success;
 }
 
-void HypervisorMain(uint64_t guest_rip) {
+void HypervisorMain(uint64_t guest_rip, VM_ENTER_CONTEXT context) {
     VMX_REGIONS* VmxonRegion = nullptr;
     VMX_REGIONS* VmcsRegion = nullptr;
 
@@ -581,7 +612,7 @@ void HypervisorMain(uint64_t guest_rip) {
         return;
     }
 
-    if (!VmcsConfiguration(guest_rip)) {
+    if (!VmcsConfiguration(guest_rip, context)) {
         Log(kError, "VmcsConfiguration Fail\n");
         return;
     }

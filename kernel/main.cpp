@@ -179,16 +179,41 @@ void TaskWallclock(uint64_t task_id, int64_t data) {
   }
 }
 
-FrameBufferConfig frame_buffer_config;
-MemoryMap         memory_map;
-acpi::RSDP        acpi_table;
-uint8_t*          boot_volume_image;
+
+extern "C" void GuestKernelMain(VM_ENTER_CONTEXT *context);
+
+__attribute__((naked))
+void GuestEntry(void) {
+    __asm__ volatile(
+        "pop %rdi\n"
+        "call GuestKernelMain\n"
+        "1:\n"
+        "hlt\n"
+        "jmp 1b\n"
+    );
+}
 
 
-extern "C" void GuestKernelMain() {
-  SetLogLevel(kWarn);
+extern "C" void GuestKernelMain(VM_ENTER_CONTEXT *context) {
+  FrameBufferConfig frame_buffer_config = *reinterpret_cast<FrameBufferConfig*>(context->Arg1);
+  acpi::RSDP        acpi_table          = *reinterpret_cast<acpi::RSDP*>(context->Arg3);
+  uint8_t*          boot_volume_image   = reinterpret_cast<uint8_t*>(context->Arg4);
+  uefi_rt            = reinterpret_cast<EFI_RUNTIME_SERVICES*>(context->Arg5);
+
+  SetLogLevel(kInfo);
+  InitializeMemoryManager(*reinterpret_cast<MemoryMap*>(context->Arg2));
+  memory_manager->ImportAllocateMap(*reinterpret_cast<BitmapMemoryManager::MapTableArrayType*>(context->Arg6));
+
+
+  InitializeGraphics(frame_buffer_config);
+  InitializeLayer();
+
   printk("GuestKernelMain started\n");
   InitializeSyscall();
+
+  fat::Initialize(boot_volume_image);
+  InitializeFont();
+  InitializePCI();
 
   InitializeMainWindow();
   InitializeTextWindow();
@@ -300,12 +325,15 @@ extern "C" void KernelMainNewStack(
     const acpi::RSDP& acpi_table_ref,
     void* volume_image,
     EFI_RUNTIME_SERVICES* rt) {
-  frame_buffer_config = frame_buffer_config_ref;
-  memory_map = memory_map_ref;
-  acpi_table = acpi_table_ref;
-  boot_volume_image = static_cast<uint8_t*>(volume_image);
   uefi_rt = rt;
 
+  VM_ENTER_CONTEXT context{};
+  context.Arg1 = reinterpret_cast<uint64_t>(&frame_buffer_config_ref);
+  context.Arg2 = reinterpret_cast<uint64_t>(&memory_map_ref);
+  context.Arg3 = reinterpret_cast<uint64_t>(&acpi_table_ref);
+  context.Arg4 = reinterpret_cast<uint64_t>(volume_image);
+  context.Arg5 = reinterpret_cast<uint64_t>(rt);
+  context.Arg6 = 0;
 
   InitializeGraphics(frame_buffer_config_ref);
   InitializeConsole();
@@ -315,18 +343,13 @@ extern "C" void KernelMainNewStack(
 
   InitializeSegmentation();
   InitializePaging();
-  InitializeMemoryManager(memory_map);
+  InitializeMemoryManager(memory_map_ref);
   InitializeTSS();
   InitializeInterrupt();
 
-  fat::Initialize(volume_image);
-  InitializeFont();
-  InitializePCI();
-
-  InitializeLayer();
   InitializeSyscall();
 
-  HypervisorMain(reinterpret_cast<uint64_t>(GuestKernelMain));
+  HypervisorMain(reinterpret_cast<uint64_t>(GuestEntry), context);
 
 }
 

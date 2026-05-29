@@ -336,9 +336,22 @@ EFI_STATUS EFIAPI UefiMain(
     Print(L"failed to open file '\\kernel.elf': %r\n", status);
     Halt();
   }
-
+  EFI_FILE_PROTOCOL* hypervisor_file;
+  status = root_dir->Open(
+      root_dir, &hypervisor_file, L"\\hypervisor.elf",
+      EFI_FILE_MODE_READ, 0);
+  if (EFI_ERROR(status)) {
+    Print(L"failed to open file '\\hypervisor.elf': %r\n", status);
+    Halt();
+  }
   VOID* kernel_buffer;
   status = ReadFile(kernel_file, &kernel_buffer);
+  if (EFI_ERROR(status)) {
+    Print(L"error: %r\n", status);
+    Halt();
+  }
+  VOID* hypervisor_buffer;
+  status = ReadFile(hypervisor_file, &hypervisor_buffer);
   if (EFI_ERROR(status)) {
     Print(L"error: %r\n", status);
     Halt();
@@ -352,14 +365,32 @@ EFI_STATUS EFIAPI UefiMain(
   status = gBS->AllocatePages(AllocateAddress, EfiLoaderData,
                               num_pages, &kernel_first_addr);
   if (EFI_ERROR(status)) {
-    Print(L"failed to allocate pages: %r\n", status);
+    Print(L"failed to allocate pages: 0x%0lx %lu %r\n", kernel_first_addr, num_pages, status);
+    Halt();
+  }
+  Elf64_Ehdr* hypervisor_ehdr = (Elf64_Ehdr*)hypervisor_buffer;
+  UINT64 hypervisor_first_addr, hypervisor_last_addr;
+  CalcLoadAddressRange(hypervisor_ehdr, &hypervisor_first_addr, &hypervisor_last_addr);
+
+  num_pages = (hypervisor_last_addr - hypervisor_first_addr + 0xfff) / 0x1000;
+  status = gBS->AllocatePages(AllocateAddress, EfiLoaderData,
+                              num_pages, &hypervisor_first_addr);
+  if (EFI_ERROR(status)) {
+    Print(L"failed to allocate pages: 0x%0lx %lu %r\n", hypervisor_first_addr, num_pages, status);
     Halt();
   }
 
   CopyLoadSegments(kernel_ehdr);
   Print(L"Kernel: 0x%0lx - 0x%0lx\n", kernel_first_addr, kernel_last_addr);
+  CopyLoadSegments(hypervisor_ehdr);
+  Print(L"Hypervisor: 0x%0lx - 0x%0lx\n", hypervisor_first_addr, hypervisor_last_addr);
 
   status = gBS->FreePool(kernel_buffer);
+  if (EFI_ERROR(status)) {
+    Print(L"failed to free pool: %r\n", status);
+    Halt();
+  }
+  status = gBS->FreePool(hypervisor_buffer);
   if (EFI_ERROR(status)) {
     Print(L"failed to free pool: %r\n", status);
     Halt();
@@ -434,7 +465,7 @@ EFI_STATUS EFIAPI UefiMain(
     }
   }
 
-  UINT64 entry_addr = *(UINT64*)(kernel_first_addr + 24);
+  UINT64 entry_addr = *(UINT64*)(hypervisor_first_addr + 24);
 
   VOID* acpi_table = NULL;
   for (UINTN i = 0; i < system_table->NumberOfTableEntries; ++i) {

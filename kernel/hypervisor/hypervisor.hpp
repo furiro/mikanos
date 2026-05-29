@@ -2,7 +2,6 @@
 #define HYPERVISOR_HPP
 
 #include <stdint.h>
-void HypervisorMain(uint64_t guest_rip);
 
 
 #define BIT(n) (1ULL << (n))
@@ -16,6 +15,15 @@ typedef struct {
     uint32_t abortIndicator;
     uint8_t  data;
 } VMX_REGIONS;
+
+typedef struct {
+	uint64_t Arg1;
+	uint64_t Arg2;
+	uint64_t Arg3;
+	uint64_t Arg4;
+	uint64_t Arg5;
+	uint64_t Arg6;
+} VM_ENTER_CONTEXT;
 
 struct VmreadResult {
     uint64_t value;
@@ -231,6 +239,7 @@ constexpr uint32_t VM_ENTRY_IA32E_MODE = 1u << 9;
 
 
 
+void HypervisorMain(uint64_t guest_rip, VM_ENTER_CONTEXT context);
 bool vmwrite_checked(uint64_t field, uint64_t value);
 
 

@@ -1,6 +1,7 @@
 #!/bin/sh -eu
 
 make ${MAKE_OPTS:-} -C kernel kernel.elf
+make ${MAKE_OPTS:-} -C kernel hypervisor.elf
 
 
 for MK in $(ls libs/*/Makefile)

@@ -81,12 +81,17 @@ class BitmapMemoryManager {
    */
   void SetMemoryRange(FrameID range_begin, FrameID range_end);
 
+  using MapTableArrayType = std::array<MapLineType, kFrameCount / kBitsPerMapLine>;
+  void ExportAllocateMap(MapTableArrayType* dst);
+  void ImportAllocateMap(const MapTableArrayType& src);
+
+
   /** @brief 空き/総フレームの数を返す
    */
   MemoryStat Stat() const;
 
  private:
-  std::array<MapLineType, kFrameCount / kBitsPerMapLine> alloc_map_;
+  MapTableArrayType alloc_map_;
   /** @brief このメモリマネージャで扱うメモリ範囲の始点． */
   FrameID range_begin_;
   /** @brief このメモリマネージャで扱うメモリ範囲の終点．最終フレームの次のフレーム． */
