@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "hypervisor.hpp"
 #include "../segment.hpp"
+#include "../logger.hpp"
 
 uint64_t read_cr4(void)
 {
@@ -249,9 +250,11 @@ extern "C" VmreadResult vmread(uint64_t field) {
 
 
 extern "C" VmxResult vmlaunch() {
+    Log(kInfo, "VMLAUNCH called\n");
     VmxResult r{};
     uint8_t cf = 0;
     uint8_t zf = 0;
+    Log(kInfo, "Executing VMLAUNCH\n");
 
     __asm__ __volatile__(
         "vmlaunch\n\t"

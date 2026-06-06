@@ -2,6 +2,7 @@
 #define HYPERVISOR_HPP
 
 #include <stdint.h>
+#include <cstddef>
 
 
 #define BIT(n) (1ULL << (n))
@@ -198,19 +199,6 @@ enum vmcs_field {
 	HOST_RSP			= 0x00006c14,
 	HOST_RIP			= 0x00006c16,
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

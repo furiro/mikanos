@@ -183,7 +183,7 @@ void TaskWallclock(uint64_t task_id, int64_t data) {
 extern "C" void GuestKernelMain(VM_ENTER_CONTEXT *context);
 
 __attribute__((naked))
-void GuestEntry(void) {
+extern "C" void GuestEntry(void) {
     __asm__ volatile(
         "pop %rdi\n"
         "call GuestKernelMain\n"
@@ -200,15 +200,19 @@ extern "C" void GuestKernelMain(VM_ENTER_CONTEXT *context) {
   uint8_t*          boot_volume_image   = reinterpret_cast<uint8_t*>(context->Arg4);
   uefi_rt            = reinterpret_cast<EFI_RUNTIME_SERVICES*>(context->Arg5);
 
+  SetLogLevel(kWarn);
   SetLogLevel(kInfo);
   InitializeMemoryManager(*reinterpret_cast<MemoryMap*>(context->Arg2));
   memory_manager->ImportAllocateMap(*reinterpret_cast<BitmapMemoryManager::MapTableArrayType*>(context->Arg6));
-
-
+  
+  
   InitializeGraphics(frame_buffer_config);
+  InitializeConsole();
   InitializeLayer();
-
   printk("GuestKernelMain started\n");
+
+  InitializePaging();
+  InitializeInterrupt();
   InitializeSyscall();
 
   fat::Initialize(boot_volume_image);
@@ -218,7 +222,7 @@ extern "C" void GuestKernelMain(VM_ENTER_CONTEXT *context) {
   InitializeMainWindow();
   InitializeTextWindow();
   layer_manager->Draw({{0, 0}, ScreenSize()});
-  
+
   acpi::Initialize(acpi_table);
   Log(kInfo, "ACPI initialized\n");
   InitializeLAPICTimer();
@@ -324,7 +328,9 @@ extern "C" void KernelMainNewStack(
     const MemoryMap& memory_map_ref,
     const acpi::RSDP& acpi_table_ref,
     void* volume_image,
-    EFI_RUNTIME_SERVICES* rt) {
+    EFI_RUNTIME_SERVICES* rt,
+    uint64_t guest_os_entry
+  ) {
   uefi_rt = rt;
 
   VM_ENTER_CONTEXT context{};
@@ -349,7 +355,11 @@ extern "C" void KernelMainNewStack(
 
   InitializeSyscall();
 
-  HypervisorMain(reinterpret_cast<uint64_t>(GuestEntry), context);
+  // uint8_t* guest_os_first_addr = reinterpret_cast<uint8_t*>(0x100000);
+  // uint64_t guest_os_entry = *reinterpret_cast<uint64_t*>(guest_os_first_addr + 24);
+
+  printk("Guest OS entry point: 0x%016llx\n", guest_os_entry);
+  HypervisorMain(guest_os_entry, context);
 
 }
 

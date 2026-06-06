@@ -372,11 +372,11 @@ EFI_STATUS EFIAPI UefiMain(
   UINT64 hypervisor_first_addr, hypervisor_last_addr;
   CalcLoadAddressRange(hypervisor_ehdr, &hypervisor_first_addr, &hypervisor_last_addr);
 
-  num_pages = (hypervisor_last_addr - hypervisor_first_addr + 0xfff) / 0x1000;
+  UINTN hypervisor_num_pages = (hypervisor_last_addr - hypervisor_first_addr + 0xfff) / 0x1000;
   status = gBS->AllocatePages(AllocateAddress, EfiLoaderData,
-                              num_pages, &hypervisor_first_addr);
+                              hypervisor_num_pages, &hypervisor_first_addr);
   if (EFI_ERROR(status)) {
-    Print(L"failed to allocate pages: 0x%0lx %lu %r\n", hypervisor_first_addr, num_pages, status);
+    Print(L"failed to allocate pages: 0x%0lx %lu %r\n", hypervisor_first_addr, hypervisor_num_pages, status);
     Halt();
   }
 
@@ -480,9 +480,11 @@ EFI_STATUS EFIAPI UefiMain(
                               const struct MemoryMap*,
                               const VOID*,
                               VOID*,
-                              EFI_RUNTIME_SERVICES*);
+                              EFI_RUNTIME_SERVICES*,
+                              UINT64 GuestOsEntry
+                            );
   EntryPointType* entry_point = (EntryPointType*)entry_addr;
-  entry_point(&config, &memmap, acpi_table, volume_image, gRT);
+  entry_point(&config, &memmap, acpi_table, volume_image, gRT, *(UINT64*)(kernel_first_addr + 24));
 
   Print(L"All done\n");
 

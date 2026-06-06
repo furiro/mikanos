@@ -3,7 +3,7 @@
 
 #define EXIT_REASON_HLT     12
 #define EXIT_REASON_WRMSR   32
-
+#define EXIT_REASON_EPT_VIOLATION 48
 typedef struct {
     uint64_t r15;
     uint64_t r14;

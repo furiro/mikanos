@@ -24,6 +24,34 @@ __attribute__((naked)) void GuestEntryPoint() {
 alignas(16) uint8_t *vm_enter_stack;
 alignas(16) uint8_t *vm_exit_stack;
 
+bool HandleEptViolation() {
+    const uint64_t q   = vmread(EXIT_QUALIFICATION).value;
+    const uint64_t gpa = vmread(GUEST_PHYSICAL_ADDRESS).value;
+    const uint64_t gla = vmread(GUEST_LINEAR_ADDRESS).value;
+    const uint64_t rip = vmread(GUEST_RIP).value;
+
+    const bool is_read  = q & (1ull << 0);
+    const bool is_write = q & (1ull << 1);
+    const bool is_exec  = q & (1ull << 2);
+
+    const bool gla_valid = q & (1ull << 7);
+
+    Log(kError, "EPT violation\n");
+    Log(kError, "rip=%lx\n", rip);
+    Log(kError, "gpa=%lx\n", gpa);
+    Log(kError, "qualification=%lx\n", q);
+    Log(kError, "read=%d write=%d exec=%d\n",
+        is_read, is_write, is_exec);
+
+    if (gla_valid) {
+        Log(kError, "gla=%lx\n", gla);
+    } else {
+        Log(kError, "gla is not valid\n");
+    }
+
+    return false;
+}
+
 extern "C" void vmexit_handler_c(VmExitContext*context) {
     SetLogLevel(kInfo);
     VmreadResult rr = vmread(VM_EXIT_REASON);
@@ -48,6 +76,14 @@ extern "C" void vmexit_handler_c(VmExitContext*context) {
         {
             if (!vmexit_handler_msr(context)) {
                 Log(kError, "vmexit_handler_msr failed\n");
+                for (;;) asm volatile("hlt");
+            }
+            break;
+        }
+        case EXIT_REASON_EPT_VIOLATION:
+        {
+            if (!HandleEptViolation()) {
+                Log(kError, "HandleEptViolation failed\n");
                 for (;;) asm volatile("hlt");
             }
             break;
@@ -208,6 +244,87 @@ bool vmwrite_checked(uint64_t field, uint64_t value) {
 #define TEMP_WB 6 << 3
 #define TEMP_LARGE_PAGE BIT(7)
 
+constexpr uint64_t kPhysMask4K = 0x000ffffffffff000ULL;
+constexpr uint64_t kPhysMask2M = 0x000fffffffe00000ULL;
+
+uint64_t* g_ept_pml4;
+uint64_t* g_ept_pdpt;
+uint64_t* g_ept_pd;
+
+
+bool SplitEpt2MPageTo4K(uint64_t gpa) {
+    const uint64_t pdpt_index = (gpa >> 30) & 0x1ff;
+    const uint64_t pd_index   = (gpa >> 21) & 0x1ff;
+
+    uint64_t* pd = &g_ept_pd[pdpt_index * 512];
+    uint64_t& pde = pd[pd_index];
+
+    // Already split: PDE points to PT.
+    if ((pde & TEMP_LARGE_PAGE) == 0) {
+        return true;
+    }
+
+    const uint64_t base_hpa = pde & kPhysMask2M;
+
+    auto pt_frame = memory_manager->Allocate(1);
+    if (pt_frame.error) {
+        Log(kError, "failed to allocate EPT PT\n");
+        return false;
+    }
+
+    auto pt = reinterpret_cast<uint64_t*>(pt_frame.value.Frame());
+    memset(pt, 0, 4096);
+
+    for (uint64_t i = 0; i < 512; ++i) {
+        const uint64_t hpa = base_hpa + i * kPageSize4K;
+
+        pt[i] =
+            (hpa & kPhysMask4K)
+          | TEMP_ALL
+          | TEMP_WB;
+    }
+
+    // Replace 2MiB leaf PDE with non-leaf PDE pointing to PT.
+    pde =
+        (reinterpret_cast<uint64_t>(pt) & kPhysMask4K)
+      | TEMP_ALL;
+
+    return true;
+}
+
+bool DisableEptAccessForPage(uint64_t gpa) {
+    if (!SplitEpt2MPageTo4K(gpa)) {
+        return false;
+    }
+
+    const uint64_t pdpt_index = (gpa >> 30) & 0x1ff;
+    const uint64_t pd_index   = (gpa >> 21) & 0x1ff;
+    const uint64_t pt_index   = (gpa >> 12) & 0x1ff;
+
+    uint64_t* pd = &g_ept_pd[pdpt_index * 512];
+    uint64_t pde = pd[pd_index];
+
+    auto pt = reinterpret_cast<uint64_t*>(pde & kPhysMask4K);
+
+    // Disable write/execute.
+    pt[pt_index] &= ~(TEMP_WRITE | TEMP_EXECUTE);
+
+    return true;
+}
+
+bool DisableEptAccessRange(uint64_t base_addr, size_t num_4k_pages) {
+    uint64_t gpa = base_addr & ~(kPageSize4K - 1);
+
+    for (size_t i = 0; i < num_4k_pages; ++i) {
+        if (!DisableEptAccessForPage(gpa)) {
+            return false;
+        }
+
+        gpa += kPageSize4K;
+    }
+
+    return true;
+}
 
 bool vmwrite_EPT() {
     auto ept_pml4_frame = memory_manager->Allocate(1);
@@ -215,32 +332,31 @@ bool vmwrite_EPT() {
         Log(kError, "malloc error\n");
         return false;
     }
-    auto ept_pml4 = reinterpret_cast<uint64_t*>(ept_pml4_frame.value.Frame());
+    g_ept_pml4 = reinterpret_cast<uint64_t*>(ept_pml4_frame.value.Frame());
 
     auto ept_pdpt_frame = memory_manager->Allocate(1);
     if (ept_pdpt_frame.error) {
         Log(kError, "malloc error\n");
         return false;
     }
-    auto ept_pdpt = reinterpret_cast<uint64_t*>(ept_pdpt_frame.value.Frame());
+    g_ept_pdpt = reinterpret_cast<uint64_t*>(ept_pdpt_frame.value.Frame());
 
     auto ept_pd_frame = memory_manager->Allocate(1 * 512);
     if (ept_pd_frame.error) {
         Log(kError, "malloc error\n");
         return false;
     }
-    auto ept_pd = reinterpret_cast<uint64_t*>(ept_pd_frame.value.Frame());
+    g_ept_pd = reinterpret_cast<uint64_t*>(ept_pd_frame.value.Frame());
 
-    ept_pml4[0] = (reinterpret_cast<uint64_t>(ept_pdpt) & 0x000ffffffffff000) | TEMP_ALL;
+    g_ept_pml4[0] = (reinterpret_cast<uint64_t>(g_ept_pdpt) & 0x000ffffffffff000) | TEMP_ALL;
     for (auto i_ept_pdpt = 0; i_ept_pdpt < 512; ++i_ept_pdpt) {
-        ept_pdpt[i_ept_pdpt] = (reinterpret_cast<uint64_t>(&ept_pd[i_ept_pdpt * 512]) & 0x000ffffffffff000) | TEMP_ALL;
+        g_ept_pdpt[i_ept_pdpt] = (reinterpret_cast<uint64_t>(&g_ept_pd[i_ept_pdpt * 512]) & 0x000ffffffffff000) | TEMP_ALL;
         for (auto i_ept_pd = 0; i_ept_pd < 512; ++i_ept_pd) {
-            ept_pd[i_ept_pdpt * 512 + i_ept_pd] = (i_ept_pdpt * kPageSize1G) + (i_ept_pd * kPageSize2M) | TEMP_ALL | TEMP_LARGE_PAGE | TEMP_WB;
+            g_ept_pd[i_ept_pdpt * 512 + i_ept_pd] = (i_ept_pdpt * kPageSize1G) + (i_ept_pd * kPageSize2M) | TEMP_ALL | TEMP_LARGE_PAGE | TEMP_WB;
         }
     }
 
-    const uint64_t eptp =
-    (reinterpret_cast<uint64_t>(ept_pml4) & 0x000ffffffffff000ULL)| 0x1e;
+    const uint64_t eptp = (reinterpret_cast<uint64_t>(g_ept_pml4) & 0x000ffffffffff000ULL)| 0x1e;
     return vmwrite_checked(EPT_POINTER, eptp);
 }
 
@@ -418,6 +534,11 @@ bool VmcsConfiguration(uint64_t guest_rip, VM_ENTER_CONTEXT context) {
     success &= vmwrite_checked(HOST_IA32_SYSENTER_ESP, rdmsr(MSR_IA32_SYSENTER_ESP));
     success &= vmwrite_checked(HOST_IA32_SYSENTER_EIP, rdmsr(MSR_IA32_SYSENTER_EIP));
 
+    if (!success) {
+        Log(kError, "vmwrite_checked failed in Host-state area setup\n");
+        return false;
+    }
+
     //
     // VM-execution control fields
     //
@@ -466,6 +587,11 @@ bool VmcsConfiguration(uint64_t guest_rip, VM_ENTER_CONTEXT context) {
         }
     }
 
+    if (!success) {
+        Log(kError, "vmwrite_checked failed in VM-execution control fields setup\n");
+        return false;
+    }
+
 
     //
     // Guest-state area
@@ -490,7 +616,7 @@ bool VmcsConfiguration(uint64_t guest_rip, VM_ENTER_CONTEXT context) {
     memset(vm_enter_stack, 0, 0x100 * 0x1000);
     // GUEST_RSP is set to the top of the stack, and the first push in GuestEntryPoint will write below it.
     // 
-    // Guest Stack COnfiguration:
+    // Guest Stack Configuration:
     //
     // +---------------------------------------+ <- GUEST_RSP (vm_enter_stack + 0x100 * 0x1000 - 8)
     // | pointer to VM_ENTER_CONTEXT (context) |    This is for the guest to know where the VM_ENTER_CONTEXT is
@@ -550,8 +676,10 @@ bool VmcsConfiguration(uint64_t guest_rip, VM_ENTER_CONTEXT context) {
     success &= vmwrite_checked(GUEST_PENDING_DBG_EXCEPTIONS, 0);
     success &= vmwrite_checked(GUEST_VMCS_PREEMPTION_TIMER_VALUE, 0);
 
-
-
+    if (!success) {
+        Log(kError, "vmwrite_checked failed in Guest-state area setup\n");
+        return false;
+    }
 
     return success;
 }

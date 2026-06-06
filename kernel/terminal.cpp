@@ -950,6 +950,9 @@ void Terminal::ExecuteLine() {
     PrintToFD(*files_[2], "hlt\n");
     asm volatile("hlt");
     // HypervisorMain();
+  } else if (strcmp(command, "cheat") == 0) {
+    PrintToFD(*files_[2], "cheat\n");
+    PrintToFD(*files_[2], "Read 0x1400000 = 0x%08x\n", *(uint32_t*)0x1400000);
   } else if (command[0] != 0) {
     auto file_entry = FindCommand(command);
     if (!file_entry) {
